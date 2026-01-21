@@ -1,4 +1,7 @@
-/.vscode
-/build
-/twitch_watcher.py
-/twitch_watcher.spec
+# 忽略所有檔案
+*
+
+# 但保留以下檔案
+!.gitignore
+!new_twitch_watcher.py
+!README.md
