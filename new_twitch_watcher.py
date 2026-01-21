@@ -39,7 +39,8 @@ else:
 CONFIG_WATCHER_PATH = BASE_DIR / "twitch_watcher_config.json"
 RECORDER_CONFIG_PATH = BASE_DIR / "recorder_config.json"
 ICON_PATH = (RESOURCE_DIR / "twitch_icon.png").as_posix()
-FFMPEG_PATH = os.path.join(RESOURCE_DIR, "ffmpeg.exe")
+# 確保路徑是絕對路徑，避免相對路徑錯誤
+FFMPEG_PATH = str((RESOURCE_DIR / "ffmpeg.exe").resolve())
 
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 TWITCH_HELIX_STREAMS = "https://api.twitch.tv/helix/streams"
@@ -112,16 +113,23 @@ class RecorderThread(QThread):
             fpath = os.path.join(s_folder, fname)
             url = f"https://www.twitch.tv/{self.sid}"
 
+            # === 修正重點：強制指定 FFmpeg 路徑 ===
+            ffmpeg_args = []
+            if os.path.exists(FFMPEG_PATH):
+                ffmpeg_args = ["--ffmpeg-ffmpeg", FFMPEG_PATH]
+
             if getattr(sys, 'frozen', False):
-                cmd = [sys.executable, "--internal-streamlink", "--twitch-disable-ads", url, self.qual, "-o", fpath]
-                if os.path.exists(FFMPEG_PATH): cmd.extend(["--ffmpeg-ffmpeg", FFMPEG_PATH])
+                cmd = [sys.executable, "--internal-streamlink", "--twitch-disable-ads"] + ffmpeg_args + [url, self.qual, "-o", fpath]
             else:
-                cmd = [sys.executable, "-m", "streamlink", "--twitch-disable-ads", url, self.qual, "-o", fpath]
+                cmd = [sys.executable, "-m", "streamlink", "--twitch-disable-ads"] + ffmpeg_args + [url, self.qual, "-o", fpath]
 
             try:
                 si = subprocess.STARTUPINFO(); si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=si, text=True)
+                # 將 stderr 也導向 PIPE 以便分析
+                self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=si, text=True, encoding='utf-8', errors='replace')
+                
                 time.sleep(2)
+                # 只要程序還在跑，就代表錄影中
                 if self.proc.poll() is None: self.log_signal.emit(self.sid, "🔴 錄影中", 1)
                 
                 stdout, stderr = self.proc.communicate()
@@ -129,13 +137,21 @@ class RecorderThread(QThread):
                 if self.proc.returncode == 0: 
                     self.log_signal.emit(self.sid, "✅ 錄影完成", 0)
                 else:
-                    # === 修正重點：擷取並顯示錯誤訊息 ===
-                    err_msg = stderr.strip() if stderr else (stdout.strip() if stdout else "未知錯誤")
-                    if "No playable streams" in err_msg or "No plugin can handle" in err_msg:
-                        pass # 這是正常的未開台訊息
+                    # === 修正重點：過濾無用的 INFO 訊息 ===
+                    combined_output = (stdout or "") + (stderr or "")
+                    
+                    if "Stream is offline" in combined_output or "No playable streams" in combined_output:
+                        pass # 正常未開台，不顯示錯誤
+                    elif "Found matching plugin" in combined_output:
+                        # 這是 Log 訊息，但如果最後 process 結束了，代表沒有錄到東西
+                        # 可能是 FFmpeg 錯誤或 Stream 結束
+                        if "error: FFmpeg" in combined_output:
+                             self.log_signal.emit(self.sid, "❌ FFmpeg 錯誤", 2)
+                        else:
+                             pass # 視為正常結束或未開台
                     else:
-                        # 顯示前100個字的錯誤，幫助除錯
-                        self.log_signal.emit(self.sid, f"⚠️ 異常: {err_msg[:100]}...", 2)
+                        # 顯示真正的錯誤
+                        self.log_signal.emit(self.sid, f"⚠️ 異常: {combined_output[:50]}...", 2)
 
             except Exception as e:
                 self.log_signal.emit(self.sid, f"❌ 執行錯誤: {str(e)}", 2)
@@ -339,6 +355,15 @@ class WatcherWidget(QtWidgets.QWidget):
         except: pass
     def _log(self, m): self.log.appendPlainText(f"[{time.strftime('%H:%M:%S')}] {m}")
     def cleanup(self): self.tmr.stop(); self.th.quit(); self.th.wait()
+
+class WatcherItemWidget(QtWidgets.QWidget):
+    removeRequested = pyqtSignal(str)
+    def __init__(self, login, parent=None):
+        super().__init__(parent); self.login = login
+        h = QtWidgets.QHBoxLayout(self); h.setContentsMargins(10, 4, 10, 4)
+        h.addWidget(QtWidgets.QLabel("🎮")); h.addWidget(QtWidgets.QLabel(login), 1)
+        btn = QtWidgets.QPushButton("✕"); btn.setObjectName("btn_row_del"); btn.setFixedSize(28, 28); btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.clicked.connect(lambda: self.removeRequested.emit(self.login)); h.addWidget(btn)
 
 class UnifiedMainWindow(QtWidgets.QMainWindow):
     def __init__(self):
