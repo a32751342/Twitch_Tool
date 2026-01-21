@@ -23,6 +23,9 @@ TOKEN_REFRESH_BUFFER_SEC = 300
 APP_NAME = "TwitchAllInOne"
 REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
+# === 修改點 1: 設定圖示路徑 ===
+ICON_PATH = (Path(__file__).resolve().parent / "twitch_icon.png").as_posix()
+
 STYLESHEET = """
     QWidget {
         background-color: #18181b; color: #efeff1;
@@ -42,14 +45,11 @@ STYLESHEET = """
     }
     QPushButton:hover { background-color: #4b4b50; }
     
-    /* 資料夾按鈕專用 */
     QPushButton#btn_browse { padding: 4px; font-size: 18px; }
     
-    /* 綠色新增按鈕 */
     QPushButton#btn_add { background-color: #00e676; color: #000; }
     QPushButton#btn_add:hover { background-color: #00c853; }
 
-    /* 列表樣式 */
     QListWidget, QTableWidget {
         background-color: #0e0e10; border: 2px solid #3a3a3d; border-radius: 6px;
         padding: 5px; font-size: 15px; outline: none;
@@ -61,7 +61,6 @@ STYLESHEET = """
         background: #161a20; color: #cfd7e3; padding: 6px; border: none; border-right: 1px solid #2a2f36;
     }
 
-    /* 紅色刪除叉叉 */
     QPushButton#btn_row_del {
         background-color: transparent; color: #ef5350; font-weight: 900;
         font-size: 16px; border: none; padding: 0px;
@@ -70,7 +69,6 @@ STYLESHEET = """
         color: #ff1744; background-color: rgba(255, 23, 68, 0.1); border-radius: 4px;
     }
     
-    /* Tab 樣式 */
     QTabWidget::pane { border: 1px solid #3a3a3d; background: #18181b; border-radius: 6px; }
     QTabBar::tab {
         background: #26262c; color: #adadb8; padding: 10px 20px;
@@ -82,6 +80,17 @@ STYLESHEET = """
     QGroupBox { font-weight: 600; border: 1px solid #2a2f36; border-radius: 8px; margin-top: 20px; }
     QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 6px; color: #9146FF; }
 """
+
+# === 修改點 2: 載入圖示 helper 函式 ===
+def _load_icon() -> QtGui.QIcon:
+    """優先載入 ICON_PATH，失敗則回退為系統預設圖示。"""
+    icon = QtGui.QIcon(ICON_PATH)
+    if not icon.isNull():
+        return icon
+    # 回退
+    return QtWidgets.QApplication.style().standardIcon(
+        QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon
+    )
 
 # ================= 共用元件: ModernCheckBox =================
 class ModernCheckBox(QtWidgets.QCheckBox):
@@ -231,7 +240,6 @@ class RecorderWidget(QtWidgets.QWidget):
 
         add_group = QtWidgets.QHBoxLayout()
         self.input_id = QtWidgets.QLineEdit()
-        # 修改點 1: 統一文字
         self.input_id.setPlaceholderText("輸入實況主ID")
         self.input_id.returnPressed.connect(self.add_streamer_ui)
         btn_add = QtWidgets.QPushButton("新增監控")
@@ -537,7 +545,6 @@ class WatcherWidget(QtWidgets.QWidget):
 
         add_layout = QtWidgets.QHBoxLayout()
         self.le_channel = QtWidgets.QLineEdit()
-        # 修改點 2: 統一文字
         self.le_channel.setPlaceholderText("輸入實況主ID")
         self.le_channel.returnPressed.connect(self._on_add_channel)
         btn_add = QtWidgets.QPushButton("加入")
@@ -771,6 +778,9 @@ class UnifiedMainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Twitch 工具箱 (錄影 & 觀看)")
         self.resize(900, 700)
         
+        # === 修改點 3: 設定視窗圖示 ===
+        self.setWindowIcon(_load_icon())
+
         self.tabs = QtWidgets.QTabWidget()
         self.setCentralWidget(self.tabs)
         
@@ -788,8 +798,10 @@ class UnifiedMainWindow(QtWidgets.QMainWindow):
         self.check_auto_run_tasks()
 
     def init_tray(self):
+        # === 修改點 4: 設定系統匣圖示 ===
         self.tray = QtWidgets.QSystemTrayIcon(self)
-        self.tray.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon))
+        self.tray.setIcon(_load_icon()) # 使用自定義圖示
+        
         menu = QtWidgets.QMenu()
         menu.addAction("顯示視窗", self.show_normal)
         menu.addAction("完全結束", self.quit_app)
@@ -844,6 +856,10 @@ class UnifiedMainWindow(QtWidgets.QMainWindow):
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
+    
+    # === 修改點 5: 設定應用程式層級圖示 ===
+    app.setWindowIcon(_load_icon())
+    
     app.setStyleSheet(STYLESHEET)
     app.setQuitOnLastWindowClosed(False)
     
