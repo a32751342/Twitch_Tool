@@ -14,17 +14,24 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QRect, QPointF
 from PyQt6.QtGui import QAction, QColor, QBrush, QPainter, QPen, QPainterPath, QIntValidator
 
-# ================= 路徑與環境設定 (打包關鍵修正) =================
+# ================= 路徑與環境設定 (內嵌資源關鍵修正) =================
 if getattr(sys, 'frozen', False):
-    # 打包後：基準路徑為 exe 所在的資料夾
+    # --- 打包後 (EXE 環境) ---
+    # BASE_DIR: 用來存設定檔 (跟 EXE 同一層)
     BASE_DIR = Path(sys.executable).parent
+    # RESOURCE_DIR: 用來讀取內嵌圖片 (在臨時資料夾 _MEIPASS)
+    if hasattr(sys, '_MEIPASS'):
+        RESOURCE_DIR = Path(sys._MEIPASS)
+    else:
+        RESOURCE_DIR = BASE_DIR
 else:
-    # 開發時：基準路徑為 python 檔案所在的資料夾
+    # --- 開發中 (Python 環境) ---
     BASE_DIR = Path(__file__).parent.resolve()
+    RESOURCE_DIR = BASE_DIR
 
 CONFIG_WATCHER_PATH = BASE_DIR / "twitch_watcher_config.json"
 RECORDER_CONFIG_PATH = BASE_DIR / "recorder_config.json"
-ICON_PATH = (BASE_DIR / "twitch_icon.png").as_posix()
+ICON_PATH = (RESOURCE_DIR / "twitch_icon.png").as_posix()
 
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 TWITCH_HELIX_STREAMS = "https://api.twitch.tv/helix/streams"
@@ -326,7 +333,6 @@ class WatcherWidget(QtWidgets.QWidget):
     def set_btn(self, active):
         if active: self.btn_run.setText("⏸ 監看中 (點擊停止)"); self.btn_run.setStyleSheet("QPushButton { background-color: #ef5350; color: white; padding: 10px; font-weight: bold; border: 2px solid #ff80ab; }")
         else: self.btn_run.setText("▶ 開始監看"); self.btn_run.setStyleSheet("QPushButton { background-color: #00e676; color: black; padding: 10px; font-weight: bold; }")
-    # === 修正處：將函式名稱統一為 toggle_watching ===
     def toggle_watching(self, checked):
         if checked: self._persist(); self.live_sessions.clear(); self._ensure_token(False); self._invoke(); self.timer.start(self._get_ival()*1000); self.set_btn(True)
         else: self.timer.stop(); self.set_btn(False)
@@ -414,7 +420,6 @@ class UnifiedMainWindow(QtWidgets.QMainWindow):
         except: pass
     def check_auto(self):
         if self.recorder_tab.check_autostart.isChecked(): self.recorder_tab.btn_start_all.setChecked(True); self.recorder_tab.toggle_global_recording(True)
-        # === 修正處：正確呼叫 toggle_watching ===
         if self.watcher_tab.cb_auto.isChecked(): self.watcher_tab.btn_run.setChecked(True); self.watcher_tab.toggle_watching(True)
 
 if __name__ == "__main__":
