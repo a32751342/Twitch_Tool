@@ -7,36 +7,43 @@ import webbrowser
 import winreg
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Tuple
+
+# ==========================================
+# 核心魔法: 內建 Streamlink CLI 模式
+# ==========================================
+if len(sys.argv) > 1 and sys.argv[1] == "--internal-streamlink":
+    sys.argv.pop(1)
+    try:
+        from streamlink_cli.main import main
+        sys.exit(main())
+    except Exception as e:
+        print(f"Internal Error: {e}")
+        sys.exit(1)
 
 import requests
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QRect, QPointF
 from PyQt6.QtGui import QAction, QColor, QBrush, QPainter, QPen, QPainterPath, QIntValidator
 
-# ================= 路徑與環境設定 (內嵌資源關鍵修正) =================
+# ================= 路徑與環境設定 =================
 if getattr(sys, 'frozen', False):
-    # --- 打包後 (EXE 環境) ---
-    # BASE_DIR: 用來存設定檔 (跟 EXE 同一層)
-    BASE_DIR = Path(sys.executable).parent
-    # RESOURCE_DIR: 用來讀取內嵌圖片 (在臨時資料夾 _MEIPASS)
+    BASE_DIR = Path(sys.executable).parent 
     if hasattr(sys, '_MEIPASS'):
         RESOURCE_DIR = Path(sys._MEIPASS)
     else:
         RESOURCE_DIR = BASE_DIR
 else:
-    # --- 開發中 (Python 環境) ---
     BASE_DIR = Path(__file__).parent.resolve()
     RESOURCE_DIR = BASE_DIR
 
 CONFIG_WATCHER_PATH = BASE_DIR / "twitch_watcher_config.json"
 RECORDER_CONFIG_PATH = BASE_DIR / "recorder_config.json"
 ICON_PATH = (RESOURCE_DIR / "twitch_icon.png").as_posix()
+FFMPEG_PATH = os.path.join(RESOURCE_DIR, "ffmpeg.exe")
 
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 TWITCH_HELIX_STREAMS = "https://api.twitch.tv/helix/streams"
 TOKEN_REFRESH_BUFFER_SEC = 300
-
 APP_NAME = "TwitchAllInOne"
 REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -66,214 +73,183 @@ STYLESHEET = """
 
 def _load_icon() -> QtGui.QIcon:
     icon = QtGui.QIcon(ICON_PATH)
-    if not icon.isNull(): return icon
-    return QtWidgets.QApplication.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon)
+    return icon if not icon.isNull() else QtWidgets.QApplication.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon)
 
 class ModernCheckBox(QtWidgets.QCheckBox):
     def __init__(self, text, parent=None):
-        super().__init__(text, parent)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(28) 
-        self.setStyleSheet("QCheckBox { spacing: 8px; font-weight: bold; color: #777; }")
+        super().__init__(text, parent); self.setCursor(Qt.CursorShape.PointingHandCursor); self.setMinimumHeight(28); self.setStyleSheet("QCheckBox { spacing: 8px; font-weight: bold; color: #777; }")
     def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        text_rect = self.rect(); text_rect.setLeft(28)
-        painter.setPen(QColor("#00e676") if self.isChecked() else QColor("#777777"))
-        font = self.font(); font.setBold(True); painter.setFont(font)
-        fm = painter.fontMetrics()
-        text_y = int((self.height() - fm.height()) / 2 + fm.ascent())
-        painter.drawText(text_rect.left(), text_y, self.text())
-        box_size = 20; box_y = int((self.height() - box_size) / 2)
-        box_rect = QRect(0, box_y, box_size, box_size)
-        border_color = QColor("#00e676") if self.isChecked() else QColor("#555555")
-        bg_color = QColor("#26262c")
-        painter.setPen(QPen(border_color, 2)); painter.setBrush(QBrush(bg_color))
-        painter.drawRoundedRect(box_rect, 5, 5)
+        p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing); r = self.rect(); r.setLeft(28)
+        p.setPen(QColor("#00e676") if self.isChecked() else QColor("#777777")); f = self.font(); f.setBold(True); p.setFont(f)
+        fm = p.fontMetrics(); ty = int((self.height() - fm.height()) / 2 + fm.ascent()); p.drawText(r.left(), ty, self.text())
+        bs = 20; by = int((self.height() - bs) / 2); br = QRect(0, by, bs, bs)
+        p.setPen(QPen(QColor("#00e676") if self.isChecked() else QColor("#555555"), 2)); p.setBrush(QBrush(QColor("#26262c"))); p.drawRoundedRect(br, 5, 5)
         if self.isChecked():
-            painter.setPen(QPen(QColor("#00e676"), 2.5))
-            path = QPainterPath()
-            path.moveTo(QPointF(box_rect.left()+4.0, box_rect.top()+10.0))
-            path.lineTo(QPointF(box_rect.left()+8.0, box_rect.top()+14.0))
-            path.lineTo(QPointF(box_rect.left()+16.0, box_rect.top()+6.0))
-            painter.drawPath(path)
-        painter.end()
+            p.setPen(QPen(QColor("#00e676"), 2.5)); path = QPainterPath()
+            path.moveTo(QPointF(br.left()+4.0, br.top()+10.0)); path.lineTo(QPointF(br.left()+8.0, br.top()+14.0)); path.lineTo(QPointF(br.left()+16.0, br.top()+6.0))
+            p.drawPath(path)
+        p.end()
 
 class RecorderItemWidget(QtWidgets.QWidget):
-    def __init__(self, text, delete_callback):
-        super().__init__()
-        layout = QtWidgets.QHBoxLayout(self)
-        layout.setContentsMargins(10, 5, 5, 5); layout.setSpacing(10)
-        self.label = QtWidgets.QLabel(text)
-        self.label.setStyleSheet("border: none; background: transparent; color: #adadb8;")
-        layout.addWidget(self.label); layout.addStretch()
-        self.btn_del = QtWidgets.QPushButton("✕")
-        self.btn_del.setObjectName("btn_row_del"); self.btn_del.setFixedSize(30, 30)
-        self.btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_del.clicked.connect(delete_callback)
-        layout.addWidget(self.btn_del)
-    def update_text(self, text, color_hex):
-        self.label.setText(text)
-        self.label.setStyleSheet(f"border: none; background: transparent; color: {color_hex};")
+    def __init__(self, text, cb):
+        super().__init__(); layout = QtWidgets.QHBoxLayout(self); layout.setContentsMargins(10,5,5,5); layout.setSpacing(10)
+        self.label = QtWidgets.QLabel(text); self.label.setStyleSheet("border:none;background:transparent;color:#adadb8;"); layout.addWidget(self.label); layout.addStretch()
+        self.btn = QtWidgets.QPushButton("✕"); self.btn.setObjectName("btn_row_del"); self.btn.setFixedSize(30,30); self.btn.setCursor(Qt.CursorShape.PointingHandCursor); self.btn.clicked.connect(cb); layout.addWidget(self.btn)
+    def update_text(self, t, c): self.label.setText(t); self.label.setStyleSheet(f"border:none;background:transparent;color:{c};")
 
 class RecorderThread(QThread):
     log_signal = pyqtSignal(str, str, int)
-    def __init__(self, streamer_id, quality, save_folder):
-        super().__init__()
-        self.streamer_id = streamer_id; self.quality = quality; self.save_folder = save_folder; self.is_running = True; self.current_process = None
+    def __init__(self, sid, qual, folder):
+        super().__init__(); self.sid = sid; self.qual = qual; self.folder = folder; self.run_flag = True; self.proc = None
     def run(self):
-        self.log_signal.emit(self.streamer_id, "啟動監控...", 0)
-        while self.is_running:
-            streamer_folder = os.path.join(self.save_folder, self.streamer_id)
-            if not os.path.exists(streamer_folder):
-                try: os.makedirs(streamer_folder)
-                except: streamer_folder = self.save_folder
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            file_name = f"{self.streamer_id}_{timestamp}.ts"
-            file_path = os.path.join(streamer_folder, file_name)
-            url = f"https://www.twitch.tv/{self.streamer_id}"
+        self.log_signal.emit(self.sid, "啟動監控...", 0)
+        while self.run_flag:
+            s_folder = os.path.join(self.folder, self.sid)
+            if not os.path.exists(s_folder):
+                try: os.makedirs(s_folder)
+                except: s_folder = self.folder
+            fname = f"{self.sid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ts"
+            fpath = os.path.join(s_folder, fname)
+            url = f"https://www.twitch.tv/{self.sid}"
 
             if getattr(sys, 'frozen', False):
-                cmd = ["streamlink", "--twitch-disable-ads", url, self.quality, "-o", file_path]
+                cmd = [sys.executable, "--internal-streamlink", "--twitch-disable-ads", url, self.qual, "-o", fpath]
+                if os.path.exists(FFMPEG_PATH): cmd.extend(["--ffmpeg-ffmpeg", FFMPEG_PATH])
             else:
-                cmd = [sys.executable, "-m", "streamlink", "--twitch-disable-ads", url, self.quality, "-o", file_path]
+                cmd = [sys.executable, "-m", "streamlink", "--twitch-disable-ads", url, self.qual, "-o", fpath]
 
             try:
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                self.current_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo, text=True)
-                time.sleep(2) 
-                if self.current_process.poll() is None: self.log_signal.emit(self.streamer_id, "🔴 錄影中", 1)
-                self.current_process.communicate()
-                if self.current_process.returncode == 0: self.log_signal.emit(self.streamer_id, "✅ 錄影完成", 0)
+                si = subprocess.STARTUPINFO(); si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=si, text=True)
+                time.sleep(2)
+                if self.proc.poll() is None: self.log_signal.emit(self.sid, "🔴 錄影中", 1)
+                
+                stdout, stderr = self.proc.communicate()
+                
+                if self.proc.returncode == 0: 
+                    self.log_signal.emit(self.sid, "✅ 錄影完成", 0)
+                else:
+                    # === 修正重點：擷取並顯示錯誤訊息 ===
+                    err_msg = stderr.strip() if stderr else (stdout.strip() if stdout else "未知錯誤")
+                    if "No playable streams" in err_msg or "No plugin can handle" in err_msg:
+                        pass # 這是正常的未開台訊息
+                    else:
+                        # 顯示前100個字的錯誤，幫助除錯
+                        self.log_signal.emit(self.sid, f"⚠️ 異常: {err_msg[:100]}...", 2)
+
             except Exception as e:
-                self.log_signal.emit(self.streamer_id, f"❌ 錯誤 (請確認已安裝 Streamlink): {str(e)}", 2)
+                self.log_signal.emit(self.sid, f"❌ 執行錯誤: {str(e)}", 2)
             
-            self.log_signal.emit(self.streamer_id, "💤 等待開播...", 0)
+            self.log_signal.emit(self.sid, "💤 等待開播...", 0)
             for _ in range(60): 
-                if not self.is_running: break
+                if not self.run_flag: break
                 time.sleep(1)
-        self.log_signal.emit(self.streamer_id, "🛑 已停止", 2)
+        self.log_signal.emit(self.sid, "🛑 已停止", 2)
     def stop(self):
-        self.is_running = False
-        if self.current_process and self.current_process.poll() is None: self.current_process.terminate()
+        self.run_flag = False
+        if self.proc and self.proc.poll() is None: self.proc.terminate()
 
 class RecorderWidget(QtWidgets.QWidget):
     sigRequestAutostartUpdate = pyqtSignal()
-    def __init__(self):
-        super().__init__(); self.workers = {}; self.is_global_started = False; self.init_ui()
+    def __init__(self): super().__init__(); self.workers = {}; self.is_started = False; self.init_ui()
     def init_ui(self):
-        layout = QtWidgets.QVBoxLayout(self); layout.setSpacing(10); layout.setContentsMargins(10, 10, 10, 10)
-        add_group = QtWidgets.QHBoxLayout()
-        self.input_id = QtWidgets.QLineEdit(); self.input_id.setPlaceholderText("輸入實況主ID")
-        self.input_id.returnPressed.connect(self.add_streamer_ui)
-        btn_add = QtWidgets.QPushButton("新增監控"); btn_add.setObjectName("btn_add"); btn_add.setCursor(Qt.CursorShape.PointingHandCursor); btn_add.clicked.connect(self.add_streamer_ui)
-        add_group.addWidget(self.input_id); add_group.addWidget(btn_add); layout.addLayout(add_group)
-        layout.addWidget(QtWidgets.QLabel("錄影監控清單"))
-        self.list_widget = QtWidgets.QListWidget(); self.list_widget.setSpacing(3); layout.addWidget(self.list_widget)
-        settings_layout = QtWidgets.QHBoxLayout()
-        self.combo_quality = QtWidgets.QComboBox(); self.combo_quality.addItems(["best", "1080p60", "720p60", "audio_only"])
-        settings_layout.addWidget(QtWidgets.QLabel("畫質:")); settings_layout.addWidget(self.combo_quality)
-        self.input_folder = QtWidgets.QLineEdit(os.getcwd())
-        btn_browse = QtWidgets.QPushButton("📂"); btn_browse.setObjectName("btn_browse"); btn_browse.setFixedWidth(40); btn_browse.setCursor(Qt.CursorShape.PointingHandCursor); btn_browse.clicked.connect(self.browse_folder)
-        settings_layout.addWidget(QtWidgets.QLabel("存檔:")); settings_layout.addWidget(self.input_folder); settings_layout.addWidget(btn_browse); layout.addLayout(settings_layout)
-        self.check_autostart = ModernCheckBox("開機自啟動並自動錄影"); self.check_autostart.toggled.connect(self.on_autostart_toggled); layout.addWidget(self.check_autostart)
-        self.btn_start_all = QtWidgets.QPushButton(); self.btn_start_all.setCursor(Qt.CursorShape.PointingHandCursor); self.btn_start_all.setCheckable(True); self.btn_start_all.clicked.connect(self.toggle_global_recording); self.set_start_button_style(False); layout.addWidget(self.btn_start_all)
-        layout.addWidget(QtWidgets.QLabel("錄影日誌")); self.text_log = QtWidgets.QTextEdit(); self.text_log.setFixedHeight(80); self.text_log.setReadOnly(True); layout.addWidget(self.text_log)
-        self.load_settings()
-    def set_start_button_style(self, active):
-        if active: self.btn_start_all.setText("🔴 錄影監控中 (點擊停止)"); self.btn_start_all.setStyleSheet("QPushButton { background-color: #ef5350; color: white; padding: 12px; font-size: 16px; border: 2px solid #ff80ab; } QPushButton:hover { background-color: #d32f2f; }")
-        else: self.btn_start_all.setText("🟢 準備就緒 (點擊開始監控)"); self.btn_start_all.setStyleSheet("QPushButton { background-color: #00e676; color: black; padding: 12px; font-size: 16px; } QPushButton:hover { background-color: #00c853; }")
-    def add_streamer_ui(self):
-        sid = self.input_id.text().strip(); 
-        if not sid: return
-        for i in range(self.list_widget.count()): 
-            if self.list_widget.item(i).data(Qt.ItemDataRole.UserRole) == sid: return
-        self.add_streamer_to_list(sid); self.input_id.clear(); self.save_settings()
-        if self.is_global_started: self.start_worker(sid)
-    def add_streamer_to_list(self, streamer_id):
-        item = QtWidgets.QListWidgetItem(); item.setData(Qt.ItemDataRole.UserRole, streamer_id)
-        widget = RecorderItemWidget(f"{streamer_id} - 準備中", lambda: self.remove_specific_streamer(streamer_id, item))
-        item.setSizeHint(widget.sizeHint()); self.list_widget.addItem(item); self.list_widget.setItemWidget(item, widget)
-    def remove_specific_streamer(self, streamer_id, item):
-        self.stop_worker(streamer_id); self.list_widget.takeItem(self.list_widget.row(item)); self.save_settings()
-    def toggle_global_recording(self, checked):
-        if checked:
-            if not os.path.exists(self.input_folder.text()):
-                try: os.makedirs(self.input_folder.text())
-                except: self.btn_start_all.setChecked(False); return
-            self.is_global_started = True; self.set_start_button_style(True); self.input_folder.setEnabled(False); self.combo_quality.setEnabled(False)
-            for i in range(self.list_widget.count()): self.start_worker(self.list_widget.item(i).data(Qt.ItemDataRole.UserRole))
+        layout = QtWidgets.QVBoxLayout(self); layout.setSpacing(10); layout.setContentsMargins(10,10,10,10)
+        h1 = QtWidgets.QHBoxLayout(); self.inp = QtWidgets.QLineEdit(); self.inp.setPlaceholderText("輸入實況主ID"); self.inp.returnPressed.connect(self.add)
+        btn = QtWidgets.QPushButton("新增監控"); btn.setObjectName("btn_add"); btn.setCursor(Qt.CursorShape.PointingHandCursor); btn.clicked.connect(self.add)
+        h1.addWidget(self.inp); h1.addWidget(btn); layout.addLayout(h1)
+        layout.addWidget(QtWidgets.QLabel("錄影監控清單")); self.lst = QtWidgets.QListWidget(); self.lst.setSpacing(3); layout.addWidget(self.lst)
+        h2 = QtWidgets.QHBoxLayout(); self.qual = QtWidgets.QComboBox(); self.qual.addItems(["best","1080p60","720p60","audio_only"])
+        h2.addWidget(QtWidgets.QLabel("畫質:")); h2.addWidget(self.qual)
+        self.fld = QtWidgets.QLineEdit(os.getcwd()); b_fld = QtWidgets.QPushButton("📂"); b_fld.setObjectName("btn_browse"); b_fld.setFixedWidth(40); b_fld.setCursor(Qt.CursorShape.PointingHandCursor); b_fld.clicked.connect(self.browse)
+        h2.addWidget(QtWidgets.QLabel("存檔:")); h2.addWidget(self.fld); h2.addWidget(b_fld); layout.addLayout(h2)
+        self.check_autostart = ModernCheckBox("開機自啟動並自動錄影"); self.check_autostart.toggled.connect(self.tog_auto); layout.addWidget(self.check_autostart)
+        self.start_btn = QtWidgets.QPushButton(); self.start_btn.setCursor(Qt.CursorShape.PointingHandCursor); self.start_btn.setCheckable(True); self.start_btn.clicked.connect(self.toggle); self.set_btn(False); layout.addWidget(self.start_btn)
+        layout.addWidget(QtWidgets.QLabel("錄影日誌")); self.log = QtWidgets.QTextEdit(); self.log.setFixedHeight(80); self.log.setReadOnly(True); layout.addWidget(self.log)
+        self.load()
+    def set_btn(self, on):
+        if on: self.start_btn.setText("🔴 錄影監控中 (點擊停止)"); self.start_btn.setStyleSheet("QPushButton { background-color:#ef5350;color:white;padding:12px;font-size:16px;border:2px solid #ff80ab; }")
+        else: self.start_btn.setText("🟢 準備就緒 (點擊開始監控)"); self.start_btn.setStyleSheet("QPushButton { background-color:#00e676;color:black;padding:12px;font-size:16px; }")
+    def add(self):
+        s = self.inp.text().strip(); 
+        if not s: return
+        for i in range(self.lst.count()): 
+            if self.lst.item(i).data(Qt.ItemDataRole.UserRole) == s: return
+        it = QtWidgets.QListWidgetItem(); it.setData(Qt.ItemDataRole.UserRole, s)
+        w = RecorderItemWidget(f"{s} - 準備中", lambda x=s, y=it: self.rem(x, y)); it.setSizeHint(w.sizeHint()); self.lst.addItem(it); self.lst.setItemWidget(it, w)
+        self.inp.clear(); self.save(); 
+        if self.is_started: self.start_one(s)
+    def rem(self, s, it): self.stop_one(s); self.lst.takeItem(self.lst.row(it)); self.save()
+    def toggle(self, on):
+        if on:
+            if not os.path.exists(self.fld.text()):
+                try: os.makedirs(self.fld.text())
+                except: self.start_btn.setChecked(False); return
+            self.is_started = True; self.set_btn(True); self.fld.setEnabled(False); self.qual.setEnabled(False)
+            for i in range(self.lst.count()): self.start_one(self.lst.item(i).data(Qt.ItemDataRole.UserRole))
         else:
-            self.is_global_started = False; self.set_start_button_style(False); self.input_folder.setEnabled(True); self.combo_quality.setEnabled(True)
-            for sid in list(self.workers.keys()): self.stop_worker(sid)
-    def start_worker(self, sid):
-        if sid in self.workers: return
-        t = RecorderThread(sid, self.combo_quality.currentText(), self.input_folder.text()); t.log_signal.connect(self.worker_update); self.workers[sid] = t; t.start()
-    def stop_worker(self, sid):
-        if sid in self.workers: self.workers[sid].stop(); self.workers[sid].wait(); del self.workers[sid]; 
-        if not self.is_global_started: self.update_status(sid, "已停止", "#adadb8")
-    def worker_update(self, sid, msg, code):
-        c = "#adadb8"
-        if code == 1: c = "#00e676"
-        elif code == 2: c = "#ef5350"
-        self.update_status(sid, msg, c)
-        if "等待" not in msg: self.text_log.append(f"{datetime.now().strftime('[%H:%M:%S]')} [{sid}] {msg}")
-    def update_status(self, sid, text, color):
-        for i in range(self.list_widget.count()):
-            it = self.list_widget.item(i)
-            if it.data(Qt.ItemDataRole.UserRole) == sid:
-                w = self.list_widget.itemWidget(it)
-                if w: w.update_text(f"{sid} - {text}", color)
+            self.is_started = False; self.set_btn(False); self.fld.setEnabled(True); self.qual.setEnabled(True)
+            for s in list(self.workers.keys()): self.stop_one(s)
+    def start_one(self, s):
+        if s in self.workers: return
+        t = RecorderThread(s, self.qual.currentText(), self.fld.text()); t.log_signal.connect(self.upd); self.workers[s] = t; t.start()
+    def stop_one(self, s):
+        if s in self.workers: self.workers[s].stop(); self.workers[s].wait(); del self.workers[s]; 
+        if not self.is_started: self.upd_ui(s, "已停止", "#adadb8")
+    def upd(self, s, m, c):
+        hex = "#adadb8"
+        if c==1: hex="#00e676"
+        elif c==2: hex="#ef5350"
+        self.upd_ui(s, m, hex)
+        if "等待" not in m: self.log.append(f"{datetime.now().strftime('[%H:%M:%S]')} [{s}] {m}")
+    def upd_ui(self, s, t, c):
+        for i in range(self.lst.count()):
+            it = self.lst.item(i)
+            if it.data(Qt.ItemDataRole.UserRole) == s:
+                w = self.lst.itemWidget(it)
+                if w: w.update_text(f"{s} - {t}", c)
                 break
-    def browse_folder(self):
-        f = QtWidgets.QFileDialog.getExistingDirectory(self, "選擇資料夾"); 
-        if f: self.input_folder.setText(f); self.save_settings()
-    def on_autostart_toggled(self): self.save_settings(); self.sigRequestAutostartUpdate.emit()
-    def load_settings(self):
+    def browse(self):
+        f = QtWidgets.QFileDialog.getExistingDirectory(self, "選擇"); 
+        if f: self.fld.setText(f); self.save()
+    def tog_auto(self): self.save(); self.sigRequestAutostartUpdate.emit()
+    def load(self):
         try:
             if RECORDER_CONFIG_PATH.exists():
-                with open(RECORDER_CONFIG_PATH, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    self.input_folder.setText(data.get("folder", os.getcwd()))
-                    self.check_autostart.setChecked(data.get("autostart", False))
-                    self.combo_quality.setCurrentText(data.get("quality", "best"))
-                    for sid in data.get("channels", []): self.add_streamer_to_list(sid)
+                d = json.loads(RECORDER_CONFIG_PATH.read_text("utf-8"))
+                self.fld.setText(d.get("f", os.getcwd())); self.check_autostart.setChecked(d.get("a", False)); self.qual.setCurrentText(d.get("q", "best"))
+                for s in d.get("c", []): 
+                    it = QtWidgets.QListWidgetItem(); it.setData(Qt.ItemDataRole.UserRole, s)
+                    w = RecorderItemWidget(f"{s} - 準備中", lambda x=s, y=it: self.rem(x, y)); it.setSizeHint(w.sizeHint()); self.lst.addItem(it); self.lst.setItemWidget(it, w)
         except: pass
-    def save_settings(self):
-        channels = [self.list_widget.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.list_widget.count())]
-        data = {"folder": self.input_folder.text(), "autostart": self.check_autostart.isChecked(), "quality": self.combo_quality.currentText(), "channels": channels}
-        try:
-            with open(RECORDER_CONFIG_PATH, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=2)
+    def save(self):
+        c = [self.lst.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.lst.count())]
+        d = {"f": self.fld.text(), "a": self.check_autostart.isChecked(), "q": self.qual.currentText(), "c": c}
+        try: RECORDER_CONFIG_PATH.write_text(json.dumps(d), "utf-8")
         except: pass
-    def cleanup(self):
-        for sid in list(self.workers.keys()): self.stop_worker(sid)
+    def cleanup(self): 
+        for s in list(self.workers.keys()): self.stop_one(s)
 
 class WatcherChecker(QtCore.QObject):
-    resultReady = QtCore.pyqtSignal(dict); errorSignal = QtCore.pyqtSignal(str); authErrorSignal = QtCore.pyqtSignal(str)
-    def __init__(self, get_headers, parent=None): super().__init__(parent); self._get_headers = get_headers
+    res = QtCore.pyqtSignal(dict); err = QtCore.pyqtSignal(str); auth_err = QtCore.pyqtSignal(str)
+    def __init__(self, gh, p=None): super().__init__(p); self.gh = gh
     @QtCore.pyqtSlot(list)
-    def check_channels(self, logins):
-        logins = [l.strip().lower() for l in logins if l]
-        out = {l: {"live": False, "title": "", "id": ""} for l in logins}
-        if not logins: self.resultReady.emit(out); return
-        ok, headers, err = self._get_headers()
-        if not ok: self.errorSignal.emit(err or "認證未就緒"); self.resultReady.emit(out); return
+    def check_channels(self, ls):
+        ls = [l.strip().lower() for l in ls if l]; out = {l: {"live": False, "title": "", "id": ""} for l in ls}
+        if not ls: self.res.emit(out); return
+        ok, h, e = self.gh()
+        if not ok: self.err.emit(e or "Auth Error"); self.res.emit(out); return
         try:
-            chunks = [logins[i:i + 100] for i in range(0, len(logins), 100)]
-            for chunk in chunks:
-                params = [("user_login", l) for l in chunk]
-                r = requests.get(TWITCH_HELIX_STREAMS, headers=headers, params=params, timeout=10)
+            cks = [ls[i:i+100] for i in range(0, len(ls), 100)]
+            for c in cks:
+                r = requests.get(TWITCH_HELIX_STREAMS, headers=h, params=[("user_login", l) for l in c], timeout=10)
                 if r.status_code == 401:
-                    self.authErrorSignal.emit("Token 失效"); ok2, headers2, err2 = self._get_headers(True)
+                    self.auth_err.emit("Token 失效"); ok2, h2, e2 = self.gh(True)
                     if not ok2: break
-                    r = requests.get(TWITCH_HELIX_STREAMS, headers=headers2, params=params, timeout=10)
+                    r = requests.get(TWITCH_HELIX_STREAMS, headers=h2, params=[("user_login", l) for l in c], timeout=10)
                 if not r.ok: continue
-                data = r.json().get("data", [])
-                for item in data:
-                    out[item.get("user_login", "").lower()] = {"live": True, "title": item.get("title", ""), "id": item.get("id", "")}
-            self.resultReady.emit(out)
-        except Exception as e: self.errorSignal.emit(str(e)); self.resultReady.emit(out)
+                for d in r.json().get("data", []): out[d.get("user_login", "").lower()] = {"live": True, "title": d.get("title", ""), "id": d.get("id", "")}
+            self.res.emit(out)
+        except Exception as ex: self.err.emit(str(ex)); self.res.emit(out)
 
 class WatcherItemWidget(QtWidgets.QWidget):
     removeRequested = pyqtSignal(str)
@@ -287,114 +263,86 @@ class WatcherItemWidget(QtWidgets.QWidget):
 class WatcherWidget(QtWidgets.QWidget):
     sigRequestAutostartUpdate = pyqtSignal(); sigCheck = QtCore.pyqtSignal(list)
     def __init__(self):
-        super().__init__(); self.cfg = self.load_config(); self.live_sessions = {}; self.init_ui()
-        self.timer = QtCore.QTimer(self); self.timer.timeout.connect(self._on_timer)
-        self.thread = QtCore.QThread(self); self.worker = WatcherChecker(self._get_headers_safely)
-        self.worker.moveToThread(self.thread); self.worker.resultReady.connect(self._on_result)
-        self.worker.errorSignal.connect(self._log); self.worker.authErrorSignal.connect(self._log)
-        self.sigCheck.connect(self.worker.check_channels); self.thread.start(); self._ensure_token(False)
+        super().__init__(); self.cfg = self.load(); self.sess = {}; self.init_ui()
+        self.tmr = QtCore.QTimer(self); self.tmr.timeout.connect(self._tick)
+        self.th = QtCore.QThread(self); self.wkr = WatcherChecker(self._gh)
+        self.wkr.moveToThread(self.th); self.wkr.res.connect(self._res); self.wkr.err.connect(self._log); self.wkr.auth_err.connect(self._log)
+        self.sigCheck.connect(self.wkr.check_channels); self.th.start(); self._ensure(False)
     def init_ui(self):
-        layout = QtWidgets.QHBoxLayout(self)
-        left = QtWidgets.QWidget(); lv = QtWidgets.QVBoxLayout(left); lv.setContentsMargins(0, 0, 0, 0)
-        grp = QtWidgets.QGroupBox("Twitch 認證"); form = QtWidgets.QFormLayout(grp)
-        self.le_cid = QtWidgets.QLineEdit(self.cfg.get("client_id", "")); self.le_sec = QtWidgets.QLineEdit(self.cfg.get("client_secret", "")); self.le_sec.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        btn_upd = QtWidgets.QPushButton("更新 Token"); btn_upd.clicked.connect(lambda: self._ensure_token(True))
-        form.addRow("Client ID", self.le_cid); form.addRow("Secret", self.le_sec); form.addRow("", btn_upd); lv.addWidget(grp)
-        
-        add_lay = QtWidgets.QHBoxLayout(); self.le_ch = QtWidgets.QLineEdit(); self.le_ch.setPlaceholderText("輸入實況主ID"); self.le_ch.returnPressed.connect(self._on_add)
-        btn_add = QtWidgets.QPushButton("加入"); btn_add.setObjectName("btn_add"); btn_add.clicked.connect(self._on_add)
-        add_lay.addWidget(self.le_ch); add_lay.addWidget(btn_add); lv.addLayout(add_lay)
-        self.list_ch = QtWidgets.QListWidget(); lv.addWidget(self.list_ch)
-        for c in self.cfg.get("channels", []): self._add_item(c)
-        
-        int_row = QtWidgets.QHBoxLayout(); int_row.addWidget(QtWidgets.QLabel("檢查間隔:"))
-        self.le_m = QtWidgets.QLineEdit(); self.le_s = QtWidgets.QLineEdit()
-        self.le_m.setValidator(QIntValidator(0, 9999)); self.le_s.setValidator(QIntValidator(0, 59))
-        self.le_m.setFixedWidth(50); self.le_s.setFixedWidth(50); self.le_m.setPlaceholderText("分"); self.le_s.setPlaceholderText("秒")
-        t = int(self.cfg.get("poll_interval_sec", 60)); m, s = divmod(max(1, t), 60)
-        self.le_m.setText(str(m)); self.le_s.setText(str(s))
-        self.le_m.textChanged.connect(self._persist); self.le_s.textChanged.connect(self._persist)
-        int_row.addWidget(self.le_m); int_row.addWidget(QtWidgets.QLabel("分")); int_row.addWidget(self.le_s); int_row.addWidget(QtWidgets.QLabel("秒")); int_row.addStretch(); lv.addLayout(int_row)
-        
-        self.cb_auto = ModernCheckBox("開機自啟動並自動監看"); self.cb_auto.setChecked(self.cfg.get("autostart", False))
-        self.cb_auto.toggled.connect(self._on_auto_tog); lv.addWidget(self.cb_auto)
-        
-        right = QtWidgets.QWidget(); rv = QtWidgets.QVBoxLayout(right); rv.setContentsMargins(0, 0, 0, 0)
-        self.table = QtWidgets.QTableWidget(0, 3); self.table.setHorizontalHeaderLabels(["頻道", "狀態", "標題"]); self.table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch); rv.addWidget(self.table)
-        self.btn_run = QtWidgets.QPushButton("▶ 開始監看"); self.btn_run.setCheckable(True); self.btn_run.clicked.connect(self.toggle_watching); self.set_btn(False); rv.addWidget(self.btn_run)
+        lay = QtWidgets.QHBoxLayout(self); l = QtWidgets.QWidget(); lv = QtWidgets.QVBoxLayout(l); lv.setContentsMargins(0,0,0,0)
+        grp = QtWidgets.QGroupBox("Twitch 認證"); f = QtWidgets.QFormLayout(grp)
+        self.cid = QtWidgets.QLineEdit(self.cfg.get("cid", "")); self.sec = QtWidgets.QLineEdit(self.cfg.get("sec", "")); self.sec.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        btn = QtWidgets.QPushButton("更新 Token"); btn.clicked.connect(lambda: self._ensure(True)); f.addRow("Client ID", self.cid); f.addRow("Secret", self.sec); f.addRow("", btn); lv.addWidget(grp)
+        hl = QtWidgets.QHBoxLayout(); self.inp = QtWidgets.QLineEdit(); self.inp.setPlaceholderText("輸入實況主ID"); self.inp.returnPressed.connect(self._add)
+        b_add = QtWidgets.QPushButton("加入"); b_add.setObjectName("btn_add"); b_add.clicked.connect(self._add); hl.addWidget(self.inp); hl.addWidget(b_add); lv.addLayout(hl)
+        self.lst = QtWidgets.QListWidget(); lv.addWidget(self.lst)
+        for c in self.cfg.get("chs", []): self._add_item(c)
+        hl2 = QtWidgets.QHBoxLayout(); hl2.addWidget(QtWidgets.QLabel("檢查間隔:"))
+        self.m = QtWidgets.QLineEdit(); self.s = QtWidgets.QLineEdit(); self.m.setValidator(QIntValidator(0,9999)); self.s.setValidator(QIntValidator(0,59))
+        self.m.setFixedWidth(50); self.s.setFixedWidth(50); self.m.setPlaceholderText("分"); self.s.setPlaceholderText("秒")
+        t = int(self.cfg.get("int", 60)); mm, ss = divmod(max(1, t), 60); self.m.setText(str(mm)); self.s.setText(str(ss))
+        self.m.textChanged.connect(self.save); self.s.textChanged.connect(self.save); hl2.addWidget(self.m); hl2.addWidget(QtWidgets.QLabel("分")); hl2.addWidget(self.s); hl2.addWidget(QtWidgets.QLabel("秒")); hl2.addStretch(); lv.addLayout(hl2)
+        self.cb_autostart = ModernCheckBox("開機自啟動並自動監看"); self.cb_autostart.setChecked(self.cfg.get("auto", False)); self.cb_autostart.toggled.connect(self._tog_auto); lv.addWidget(self.cb_autostart)
+        r = QtWidgets.QWidget(); rv = QtWidgets.QVBoxLayout(r); rv.setContentsMargins(0,0,0,0)
+        self.tbl = QtWidgets.QTableWidget(0, 3); self.tbl.setHorizontalHeaderLabels(["頻道", "狀態", "標題"]); self.tbl.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch); rv.addWidget(self.tbl)
+        self.run_btn = QtWidgets.QPushButton("▶ 開始監看"); self.run_btn.setCheckable(True); self.run_btn.clicked.connect(self.toggle_watching); self.set_btn(False); rv.addWidget(self.run_btn)
         self.log = QtWidgets.QPlainTextEdit(); self.log.setReadOnly(True); self.log.setFixedHeight(100); rv.addWidget(self.log)
-        
-        layout.addWidget(left, 1); layout.addWidget(right, 2)
-        self.le_cid.textChanged.connect(self._persist); self.le_sec.textChanged.connect(self._persist)
-
-    def _get_ival(self): 
-        try: return max(5, int(self.le_m.text() or 0)*60 + int(self.le_s.text() or 0))
+        lay.addWidget(l, 1); lay.addWidget(r, 2); self.cid.textChanged.connect(self.save); self.sec.textChanged.connect(self.save)
+    def set_btn(self, on):
+        if on: self.run_btn.setText("⏸ 監看中 (點擊停止)"); self.run_btn.setStyleSheet("QPushButton { background-color:#ef5350;color:white;padding:10px;font-weight:bold;border:2px solid #ff80ab; }")
+        else: self.run_btn.setText("▶ 開始監看"); self.run_btn.setStyleSheet("QPushButton { background-color:#00e676;color:black;padding:10px;font-weight:bold; }")
+    def toggle_watching(self, on):
+        if on: self.save(); self.sess.clear(); self._ensure(False); self._tick(); self.tmr.start(self._get_t()*1000); self.set_btn(True)
+        else: self.tmr.stop(); self.set_btn(False)
+    def _get_t(self):
+        try: return max(5, int(self.m.text() or 0)*60 + int(self.s.text() or 0))
         except: return 60
-    def set_btn(self, active):
-        if active: self.btn_run.setText("⏸ 監看中 (點擊停止)"); self.btn_run.setStyleSheet("QPushButton { background-color: #ef5350; color: white; padding: 10px; font-weight: bold; border: 2px solid #ff80ab; }")
-        else: self.btn_run.setText("▶ 開始監看"); self.btn_run.setStyleSheet("QPushButton { background-color: #00e676; color: black; padding: 10px; font-weight: bold; }")
-    def toggle_watching(self, checked):
-        if checked: self._persist(); self.live_sessions.clear(); self._ensure_token(False); self._invoke(); self.timer.start(self._get_ival()*1000); self.set_btn(True)
-        else: self.timer.stop(); self.set_btn(False)
-    def _on_timer(self): self._invoke()
-    def _ensure_token(self, force):
-        cid = self.le_cid.text().strip(); sec = self.le_sec.text().strip()
-        if not force and self.cfg.get("access_token") and (self.cfg.get("token_expires_at", 0) - time.time() > 300): return True
-        if not cid or not sec: return False
+    def _tick(self): self.sigCheck.emit([self.lst.itemWidget(self.lst.item(i)).login for i in range(self.lst.count())])
+    def _ensure(self, f):
+        if not f and self.cfg.get("tk") and (self.cfg.get("exp", 0) - time.time() > 300): return True
+        if not self.cid.text() or not self.sec.text(): return False
         try:
-            r = requests.post(TWITCH_TOKEN_URL, data={"client_id": cid, "client_secret": sec, "grant_type": "client_credentials"})
-            if r.ok: d = r.json(); self.cfg["access_token"] = d["access_token"]; self.cfg["token_expires_at"] = int(time.time()) + d["expires_in"]; self._persist(); self._log("Token 更新成功"); return True
+            r = requests.post(TWITCH_TOKEN_URL, data={"client_id": self.cid.text(), "client_secret": self.sec.text(), "grant_type": "client_credentials"})
+            if r.ok: d = r.json(); self.cfg["tk"] = d["access_token"]; self.cfg["exp"] = int(time.time()) + d["expires_in"]; self.save(); self._log("Token OK"); return True
         except: pass
         return False
-    def _get_headers_safely(self, refresh=False):
-        if not self._ensure_token(refresh): return False, {}, "Token 無效"
-        return True, {"Client-Id": self.le_cid.text(), "Authorization": f"Bearer {self.cfg['access_token']}"}, ""
-    def _invoke(self): 
-        l = []
-        for i in range(self.list_ch.count()):
-            w = self.list_ch.itemWidget(self.list_ch.item(i))
-            if w: l.append(w.login)
-        self.sigCheck.emit(l)
-    def _on_result(self, res):
-        self.table.setRowCount(0)
-        for l, i in res.items():
-            r = self.table.rowCount(); self.table.insertRow(r)
-            self.table.setItem(r, 0, QtWidgets.QTableWidgetItem(l))
-            st = QtWidgets.QTableWidgetItem("LIVE" if i['live'] else "Offline")
-            st.setForeground(QColor("#aef1b9" if i['live'] else "#95a2b3")); self.table.setItem(r, 1, st)
-            self.table.setItem(r, 2, QtWidgets.QTableWidgetItem(i['title']))
-            if i['live']:
-                if i['id'] != self.live_sessions.get(l):
-                    self.live_sessions[l] = i['id']; self._log(f"{l} 開台"); webbrowser.open(f"https://www.twitch.tv/{l}")
+    def _gh(self, r=False):
+        if not self._ensure(r): return False, {}, "Token Invalid"
+        return True, {"Client-Id": self.cid.text(), "Authorization": f"Bearer {self.cfg['tk']}"}, ""
+    def _res(self, d):
+        self.tbl.setRowCount(0)
+        for l, i in d.items():
+            r = self.tbl.rowCount(); self.tbl.insertRow(r); self.tbl.setItem(r, 0, QtWidgets.QTableWidgetItem(l))
+            st = QtWidgets.QTableWidgetItem("LIVE" if i['live'] else "Offline"); st.setForeground(QColor("#aef1b9" if i['live'] else "#95a2b3")); self.tbl.setItem(r, 1, st)
+            self.tbl.setItem(r, 2, QtWidgets.QTableWidgetItem(i['title']))
+            if i['live'] and i['id'] != self.sess.get(l): self.sess[l] = i['id']; self._log(f"{l} 開台"); webbrowser.open(f"https://www.twitch.tv/{l}")
     def _add_item(self, l):
-        it = QtWidgets.QListWidgetItem(); w = WatcherItemWidget(l); w.removeRequested.connect(self._rem); it.setSizeHint(w.sizeHint()); self.list_ch.addItem(it); self.list_ch.setItemWidget(it, w)
-    def _on_add(self):
-        c = self.le_ch.text().strip().lower(); ex = False
-        for i in range(self.list_ch.count()): 
-            if self.list_ch.itemWidget(self.list_ch.item(i)).login == c: ex = True
-        if not ex: self._add_item(c); self._persist()
-        self.le_ch.clear()
+        it = QtWidgets.QListWidgetItem(); w = WatcherItemWidget(l); w.removeRequested.connect(self._rem); it.setSizeHint(w.sizeHint()); self.lst.addItem(it); self.lst.setItemWidget(it, w)
+    def _add(self):
+        c = self.inp.text().strip().lower(); ex = False
+        for i in range(self.lst.count()): 
+            if self.lst.itemWidget(self.lst.item(i)).login == c: ex = True
+        if not ex: self._add_item(c); self.save()
+        self.inp.clear()
     def _rem(self, l):
-        for i in range(self.list_ch.count()):
-            if self.list_ch.itemWidget(self.list_ch.item(i)).login == l: self.list_ch.takeItem(i); break
-        self._persist()
-    def _on_auto_tog(self): self._persist(); self.sigRequestAutostartUpdate.emit()
-    def load_config(self):
-        if CONFIG_WATCHER_PATH.exists():
-            try: return json.loads(CONFIG_WATCHER_PATH.read_text(encoding="utf-8"))
-            except: pass
-        return {}
-    def _persist(self):
-        chs = [self.list_ch.itemWidget(self.list_ch.item(i)).login for i in range(self.list_ch.count())]
-        self.cfg.update({"client_id": self.le_cid.text(), "client_secret": self.le_sec.text(), "channels": chs, "poll_interval_sec": self._get_ival(), "autostart": self.cb_auto.isChecked()})
-        CONFIG_WATCHER_PATH.write_text(json.dumps(self.cfg, indent=2), encoding="utf-8")
+        for i in range(self.lst.count()):
+            if self.lst.itemWidget(self.lst.item(i)).login == l: self.lst.takeItem(i); break
+        self.save()
+    def _tog_auto(self): self.save(); self.sigRequestAutostartUpdate.emit()
+    def load(self):
+        try: return json.loads(CONFIG_WATCHER_PATH.read_text("utf-8")) if CONFIG_WATCHER_PATH.exists() else {}
+        except: return {}
+    def save(self):
+        chs = [self.lst.itemWidget(self.lst.item(i)).login for i in range(self.lst.count())]
+        self.cfg.update({"cid": self.cid.text(), "sec": self.sec.text(), "chs": chs, "int": self._get_t(), "auto": self.cb_autostart.isChecked()})
+        try: CONFIG_WATCHER_PATH.write_text(json.dumps(self.cfg), "utf-8")
+        except: pass
     def _log(self, m): self.log.appendPlainText(f"[{time.strftime('%H:%M:%S')}] {m}")
-    def cleanup(self): self.timer.stop(); self.thread.quit(); self.thread.wait()
+    def cleanup(self): self.tmr.stop(); self.th.quit(); self.th.wait()
 
 class UnifiedMainWindow(QtWidgets.QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("Twitch 工具箱 (錄影 & 觀看)"); self.resize(900, 700)
-        self.setWindowIcon(_load_icon())
+        super().__init__(); self.setWindowTitle("Twitch 工具箱 (錄影 & 觀看)"); self.resize(900, 700); self.setWindowIcon(_load_icon())
         self.tabs = QtWidgets.QTabWidget(); self.setCentralWidget(self.tabs)
         self.recorder_tab = RecorderWidget(); self.watcher_tab = WatcherWidget()
         self.tabs.addTab(self.recorder_tab, "📹 直播錄影保存"); self.tabs.addTab(self.watcher_tab, "🔔 開播通知觀看")
@@ -408,7 +356,7 @@ class UnifiedMainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, e): e.ignore(); self.hide(); self.tray.showMessage("Twitch 工具箱", "程式已縮小至系統列", QtWidgets.QSystemTrayIcon.MessageIcon.Information, 2000)
     def quit(self): self.recorder_tab.cleanup(); self.watcher_tab.cleanup(); QtWidgets.QApplication.quit()
     def update_reg(self):
-        run = self.recorder_tab.check_autostart.isChecked() or self.watcher_tab.cb_auto.isChecked()
+        run = self.recorder_tab.check_autostart.isChecked() or self.watcher_tab.cb_autostart.isChecked()
         try:
             k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_WRITE)
             if run:
@@ -420,10 +368,8 @@ class UnifiedMainWindow(QtWidgets.QMainWindow):
         except: pass
     def check_auto(self):
         if self.recorder_tab.check_autostart.isChecked(): self.recorder_tab.btn_start_all.setChecked(True); self.recorder_tab.toggle_global_recording(True)
-        if self.watcher_tab.cb_auto.isChecked(): self.watcher_tab.btn_run.setChecked(True); self.watcher_tab.toggle_watching(True)
+        if self.watcher_tab.cb_autostart.isChecked(): self.watcher_tab.run_btn.setChecked(True); self.watcher_tab.toggle_watching(True)
 
 if __name__ == "__main__":
-    app = QtWidgets.QApplication(sys.argv)
-    app.setWindowIcon(_load_icon())
-    app.setStyleSheet(STYLESHEET); app.setQuitOnLastWindowClosed(False)
+    app = QtWidgets.QApplication(sys.argv); app.setWindowIcon(_load_icon()); app.setStyleSheet(STYLESHEET); app.setQuitOnLastWindowClosed(False)
     w = UnifiedMainWindow(); w.show(); sys.exit(app.exec())
