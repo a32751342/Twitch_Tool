@@ -7,7 +7,7 @@ import webbrowser
 import winreg
 from pathlib import Path
 from datetime import datetime
-
+#測試
 # ==========================================
 # 核心魔法: 內建 Streamlink CLI 模式
 # ==========================================
