@@ -193,15 +193,18 @@ class RecorderThread(QThread):
                 
                 stdout, stderr = self.proc.communicate()
 
+                # 檢查是否有錄到內容（無論是正常結束還是手動停止）
+                has_content = os.path.exists(fpath) and os.path.getsize(fpath) > 0
+
                 if self.proc.returncode == 0:
                     self.log_signal.emit(self.sid, "✅ 錄影完成", 0)
                     # 發送壓縮信號
-                    if os.path.exists(fpath) and os.path.getsize(fpath) > 0:
+                    if has_content:
                         self.compress_signal.emit(self.sid, fpath)
                 else:
                     # === 修正重點：過濾無用的 INFO 訊息 ===
                     combined_output = (stdout or "") + (stderr or "")
-                    
+
                     if "Stream is offline" in combined_output or "No playable streams" in combined_output:
                         pass # 正常未開台，不顯示錯誤
                     elif "Found matching plugin" in combined_output:
@@ -214,6 +217,11 @@ class RecorderThread(QThread):
                     else:
                         # 顯示真正的錯誤
                         self.log_signal.emit(self.sid, f"⚠️ 異常: {combined_output[:50]}...", 2)
+
+                    # 即使是異常結束，只要有錄到內容就壓縮（例如手動停止）
+                    if has_content:
+                        self.log_signal.emit(self.sid, "✅ 錄影已停止", 0)
+                        self.compress_signal.emit(self.sid, fpath)
 
             except Exception as e:
                 self.log_signal.emit(self.sid, f"❌ 執行錯誤: {str(e)}", 2)
