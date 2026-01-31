@@ -98,8 +98,67 @@ class RecorderItemWidget(QtWidgets.QWidget):
         self.btn = QtWidgets.QPushButton("✕"); self.btn.setObjectName("btn_row_del"); self.btn.setFixedSize(30,30); self.btn.setCursor(Qt.CursorShape.PointingHandCursor); self.btn.clicked.connect(cb); layout.addWidget(self.btn)
     def update_text(self, t, c): self.label.setText(t); self.label.setStyleSheet(f"border:none;background:transparent;color:{c};")
 
+class CompressThread(QThread):
+    log_signal = pyqtSignal(str, str, int)
+    finished_signal = pyqtSignal(str, str, bool)  # sid, filepath, success
+    def __init__(self, sid, ts_path, keep_original):
+        super().__init__()
+        self.sid = sid
+        self.ts_path = ts_path
+        self.keep_original = keep_original
+    def run(self):
+        if not os.path.exists(self.ts_path):
+            self.log_signal.emit(self.sid, "❌ 檔案不存在", 2)
+            self.finished_signal.emit(self.sid, self.ts_path, False)
+            return
+        mp4_path = self.ts_path.rsplit('.', 1)[0] + '.mp4'
+        self.log_signal.emit(self.sid, "🔄 壓縮中...", 0)
+        try:
+            cmd = [
+                FFMPEG_PATH, '-i', self.ts_path,
+                '-c:v', 'libx264', '-preset', 'medium', '-crf', '23',
+                '-c:a', 'aac', '-b:a', '128k',
+                '-movflags', '+faststart',
+                '-y', mp4_path
+            ]
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=si)
+            proc.communicate()
+            if proc.returncode == 0 and os.path.exists(mp4_path):
+                # 驗證 MP4 可播放
+                verify_cmd = [FFMPEG_PATH, '-v', 'error', '-i', mp4_path, '-f', 'null', '-']
+                verify_proc = subprocess.Popen(verify_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=si)
+                _, verify_err = verify_proc.communicate()
+                if verify_proc.returncode == 0:
+                    ts_size = os.path.getsize(self.ts_path) / (1024*1024)
+                    mp4_size = os.path.getsize(mp4_path) / (1024*1024)
+                    saved = ((ts_size - mp4_size) / ts_size * 100) if ts_size > 0 else 0
+                    self.log_signal.emit(self.sid, f"✅ 壓縮完成 (節省 {saved:.1f}%)", 0)
+                    if not self.keep_original:
+                        try:
+                            os.remove(self.ts_path)
+                            self.log_signal.emit(self.sid, "🗑️ 已刪除原始檔", 0)
+                        except Exception as e:
+                            self.log_signal.emit(self.sid, f"⚠️ 刪除原始檔失敗: {str(e)}", 2)
+                    self.finished_signal.emit(self.sid, mp4_path, True)
+                else:
+                    self.log_signal.emit(self.sid, "❌ MP4 驗證失敗，保留原始檔", 2)
+                    try:
+                        os.remove(mp4_path)
+                    except:
+                        pass
+                    self.finished_signal.emit(self.sid, self.ts_path, False)
+            else:
+                self.log_signal.emit(self.sid, "❌ 壓縮失敗", 2)
+                self.finished_signal.emit(self.sid, self.ts_path, False)
+        except Exception as e:
+            self.log_signal.emit(self.sid, f"❌ 壓縮錯誤: {str(e)}", 2)
+            self.finished_signal.emit(self.sid, self.ts_path, False)
+
 class RecorderThread(QThread):
     log_signal = pyqtSignal(str, str, int)
+    compress_signal = pyqtSignal(str, str)  # sid, filepath
     def __init__(self, sid, qual, folder):
         super().__init__(); self.sid = sid; self.qual = qual; self.folder = folder; self.run_flag = True; self.proc = None
     def run(self):
@@ -133,9 +192,12 @@ class RecorderThread(QThread):
                 if self.proc.poll() is None: self.log_signal.emit(self.sid, "🔴 錄影中", 1)
                 
                 stdout, stderr = self.proc.communicate()
-                
-                if self.proc.returncode == 0: 
+
+                if self.proc.returncode == 0:
                     self.log_signal.emit(self.sid, "✅ 錄影完成", 0)
+                    # 發送壓縮信號
+                    if os.path.exists(fpath) and os.path.getsize(fpath) > 0:
+                        self.compress_signal.emit(self.sid, fpath)
                 else:
                     # === 修正重點：過濾無用的 INFO 訊息 ===
                     combined_output = (stdout or "") + (stderr or "")
@@ -167,7 +229,7 @@ class RecorderThread(QThread):
 
 class RecorderWidget(QtWidgets.QWidget):
     sigRequestAutostartUpdate = pyqtSignal()
-    def __init__(self): super().__init__(); self.workers = {}; self.is_started = False; self.init_ui()
+    def __init__(self): super().__init__(); self.workers = {}; self.compress_workers = {}; self.is_started = False; self.init_ui()
     def init_ui(self):
         layout = QtWidgets.QVBoxLayout(self); layout.setSpacing(10); layout.setContentsMargins(10,10,10,10)
         h1 = QtWidgets.QHBoxLayout(); self.inp = QtWidgets.QLineEdit(); self.inp.setPlaceholderText("輸入實況主ID"); self.inp.returnPressed.connect(self.add)
@@ -178,6 +240,10 @@ class RecorderWidget(QtWidgets.QWidget):
         h2.addWidget(QtWidgets.QLabel("畫質:")); h2.addWidget(self.qual)
         self.fld = QtWidgets.QLineEdit(os.getcwd()); b_fld = QtWidgets.QPushButton("📂"); b_fld.setObjectName("btn_browse"); b_fld.setFixedWidth(40); b_fld.setCursor(Qt.CursorShape.PointingHandCursor); b_fld.clicked.connect(self.browse)
         h2.addWidget(QtWidgets.QLabel("存檔:")); h2.addWidget(self.fld); h2.addWidget(b_fld); layout.addLayout(h2)
+        h3 = QtWidgets.QHBoxLayout()
+        self.check_compress = ModernCheckBox("錄影完成後自動壓縮"); self.check_compress.setChecked(True); self.check_compress.toggled.connect(self.save)
+        self.check_keep_original = ModernCheckBox("保留原始 .ts 檔案"); self.check_keep_original.setChecked(False); self.check_keep_original.toggled.connect(self.save)
+        h3.addWidget(self.check_compress); h3.addWidget(self.check_keep_original); h3.addStretch(); layout.addLayout(h3)
         self.check_autostart = ModernCheckBox("開機自啟動並自動錄影"); self.check_autostart.toggled.connect(self.tog_auto); layout.addWidget(self.check_autostart)
         self.start_btn = QtWidgets.QPushButton(); self.start_btn.setCursor(Qt.CursorShape.PointingHandCursor); self.start_btn.setCheckable(True); self.start_btn.clicked.connect(self.toggle); self.set_btn(False); layout.addWidget(self.start_btn)
         layout.addWidget(QtWidgets.QLabel("錄影日誌")); self.log = QtWidgets.QTextEdit(); self.log.setFixedHeight(80); self.log.setReadOnly(True); layout.addWidget(self.log)
@@ -207,7 +273,30 @@ class RecorderWidget(QtWidgets.QWidget):
             for s in list(self.workers.keys()): self.stop_one(s)
     def start_one(self, s):
         if s in self.workers: return
-        t = RecorderThread(s, self.qual.currentText(), self.fld.text()); t.log_signal.connect(self.upd); self.workers[s] = t; t.start()
+        t = RecorderThread(s, self.qual.currentText(), self.fld.text())
+        t.log_signal.connect(self.upd)
+        t.compress_signal.connect(self.handle_compress)
+        self.workers[s] = t
+        t.start()
+    def handle_compress(self, sid, fpath):
+        if not self.check_compress.isChecked():
+            return
+        if not os.path.exists(FFMPEG_PATH):
+            self.log.append(f"{datetime.now().strftime('[%H:%M:%S]')} [{sid}] ⚠️ FFmpeg 不存在，跳過壓縮")
+            return
+        compress_key = f"{sid}_{os.path.basename(fpath)}"
+        if compress_key in self.compress_workers:
+            return
+        ct = CompressThread(sid, fpath, self.check_keep_original.isChecked())
+        ct.log_signal.connect(self.upd)
+        ct.finished_signal.connect(self.compress_finished)
+        self.compress_workers[compress_key] = ct
+        ct.start()
+    def compress_finished(self, sid, fpath, success):
+        compress_key = f"{sid}_{os.path.basename(fpath)}"
+        if compress_key in self.compress_workers:
+            self.compress_workers[compress_key].wait()
+            del self.compress_workers[compress_key]
     def stop_one(self, s):
         if s in self.workers: self.workers[s].stop(); self.workers[s].wait(); del self.workers[s]; 
         if not self.is_started: self.upd_ui(s, "已停止", "#adadb8")
@@ -233,17 +322,20 @@ class RecorderWidget(QtWidgets.QWidget):
             if RECORDER_CONFIG_PATH.exists():
                 d = json.loads(RECORDER_CONFIG_PATH.read_text("utf-8"))
                 self.fld.setText(d.get("f", os.getcwd())); self.check_autostart.setChecked(d.get("a", False)); self.qual.setCurrentText(d.get("q", "best"))
-                for s in d.get("c", []): 
+                self.check_compress.setChecked(d.get("compress", True)); self.check_keep_original.setChecked(d.get("keep_original", False))
+                for s in d.get("c", []):
                     it = QtWidgets.QListWidgetItem(); it.setData(Qt.ItemDataRole.UserRole, s)
                     w = RecorderItemWidget(f"{s} - 準備中", lambda x=s, y=it: self.rem(x, y)); it.setSizeHint(w.sizeHint()); self.lst.addItem(it); self.lst.setItemWidget(it, w)
         except: pass
     def save(self):
         c = [self.lst.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.lst.count())]
-        d = {"f": self.fld.text(), "a": self.check_autostart.isChecked(), "q": self.qual.currentText(), "c": c}
+        d = {"f": self.fld.text(), "a": self.check_autostart.isChecked(), "q": self.qual.currentText(), "c": c, "compress": self.check_compress.isChecked(), "keep_original": self.check_keep_original.isChecked()}
         try: RECORDER_CONFIG_PATH.write_text(json.dumps(d), "utf-8")
         except: pass
-    def cleanup(self): 
+    def cleanup(self):
         for s in list(self.workers.keys()): self.stop_one(s)
+        for ct in list(self.compress_workers.values()):
+            ct.wait()
 
 class WatcherChecker(QtCore.QObject):
     res = QtCore.pyqtSignal(dict); err = QtCore.pyqtSignal(str); auth_err = QtCore.pyqtSignal(str)
@@ -392,7 +484,7 @@ class UnifiedMainWindow(QtWidgets.QMainWindow):
             winreg.CloseKey(k)
         except: pass
     def check_auto(self):
-        if self.recorder_tab.check_autostart.isChecked(): self.recorder_tab.btn_start_all.setChecked(True); self.recorder_tab.toggle_global_recording(True)
+        if self.recorder_tab.check_autostart.isChecked(): self.recorder_tab.start_btn.setChecked(True); self.recorder_tab.toggle(True)
         if self.watcher_tab.cb_autostart.isChecked(): self.watcher_tab.run_btn.setChecked(True); self.watcher_tab.toggle_watching(True)
 
 if __name__ == "__main__":
