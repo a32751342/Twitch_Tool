@@ -56,25 +56,11 @@ Twitch 工具箱是一個基於 PyQt6 開發的桌面應用程式，專為 Twitc
 
 ## 📦 下載安裝
 
-### 方式一：直接下載（推薦）
+直接下載
 
 1. 前往 [Releases](../../releases) 頁面
 2. 下載最新版本的 `Twitch工具箱.exe`
 3. 雙擊執行，**無需安裝 Python 環境**
-
-### 方式二：從原始碼建置
-
-```bash
-# 克隆專案
-git clone https://github.com/a32751342/Twitch_Tool.git
-cd Twitch_Tool
-
-# 安裝依賴
-pip install -r requirements.txt
-
-# 執行程式
-python new_twitch_watcher.py
-```
 
 ---
 
