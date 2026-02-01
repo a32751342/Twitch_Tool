@@ -4,7 +4,6 @@
 
 **一站式 Twitch 直播管理工具**
 
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://github.com/a32751342/Twitch_Tool)
 [![Python](https://img.shields.io/badge/Python-3.8+-green.svg)](https://www.python.org/)
 
